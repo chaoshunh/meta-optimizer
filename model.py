@@ -6,16 +6,27 @@ import torch.nn.functional as F
 
 class MLP(nn.Module):
     ''' A multi-layer perceptron.'''
-    def __init__(self):
+    def __init__(self, num_layers=20, channels=32):
         super(MLP, self).__init__()
-        self.fc1 = nn.Linear(28*28, 32) # mnist image size:28*28
-        self.fc2 = nn.Linear(32, 10) # mnist label types: 10
+        self.fc1 = nn.Linear(28*28, channels) # mnist image size:28*28
+        self.layers = self._make_layers(num_layers, channels)
+        self.fc = nn.Linear(channels, 10) # mnist label types: 10
 
+#        self.model = torch.nn.Sequential(
     def forward(self, x):
         x = x.view(-1, 28*28)
         x = torch.sigmoid(self.fc1(x))
-        x = self.fc2(x)
+        x = torch.sigmoid(self.layers(x))
+        x = self.fc(x)
         return F.log_softmax(x, dim=1)
+
+    def _make_layers(self, num_layers, channels):
+        layers = []
+        for l in range(num_layers):
+            layers.append(nn.Linear(channels, channels))
+
+        return nn.Sequential(*layers)
+                        
 
 class Simple_CNN(nn.Module):
     ''' A simple convolution neural network.'''
@@ -51,10 +62,10 @@ class DenseNet(nn.Module):
     pass
 
 if __name__ == "__main__":
-    mlp = MLP()
+    mlp = MLP(num_layers=10, channels=32)
     scnn = Simple_CNN()
     x = torch.randn(1, 1, 28, 28)
-    print(mlp(x))
+    print(len(list(mlp.parameters())))
     print(scnn(x))
 
         

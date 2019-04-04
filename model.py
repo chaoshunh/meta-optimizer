@@ -8,11 +8,11 @@ class MLP(nn.Module):
     ''' A multi-layer perceptron.'''
     def __init__(self, num_layers=20, channels=32):
         super(MLP, self).__init__()
-        self.fc1 = nn.Linear(28*28, channels) # mnist image size:28*28
+                         
+        self.fc0 = nn.Linear(28*28, channels) # mnist image size:28*28
         self.layers = self._make_layers(num_layers, channels)
-        self.fc = nn.Linear(channels, 10) # mnist label types: 10
+        self.output = nn.Linear(channels, 10) # mnist label types: 10
 
-#        self.model = torch.nn.Sequential(
     def forward(self, x):
         x = x.view(-1, 28*28)
         x = torch.sigmoid(self.fc1(x))
@@ -45,7 +45,7 @@ class Simple_CNN(nn.Module):
 
     def forward(self, x):
         # Max pooling over a (2,2) window
-        x = F.max_pool2d(F.relu(self.conv1(x)), (2,2))
+        x = F.max_pool2d(F.relu(self.conv1(x)),2)
         x = x.view(-1, self.num_flat_features(x))
         x = F.relu(self.fc1(x))
         x = self.fc2(x)
@@ -63,6 +63,9 @@ class DenseNet(nn.Module):
 
 if __name__ == "__main__":
     mlp = MLP(num_layers=10, channels=32)
+    print(len(list(mlp.parameters())))
+    print(len(list(mlp.children())))
+
     scnn = Simple_CNN()
     x = torch.randn(1, 1, 28, 28)
     print(len(list(mlp.parameters())))

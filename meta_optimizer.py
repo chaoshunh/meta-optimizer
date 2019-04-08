@@ -14,16 +14,17 @@ from layer_norm_lstm import LayerNormLSTMCell
 from model import MLP
 from utils import preprocess_gradients
 
-class MetaOptimizer(nn.Module):
+class SimpleMetaOptimizer(nn.Module):
 
     def __init__(self, model, num_layers, hidden_size):
-        super(MetaOptimizer, self).__init__()
+        super(SimpleMetaOptimizer, self).__init__()
         self.meta_model = model
+        
         self.linear1 = nn.Linear(6, 2)
         self.linear1.bias.data[0] = 1
 
     def forward(self, x):
-        x = F.sigmoid(self.linear1(x))
+        x = torch.sigmoid(self.linear1(x))
         return x.split(1, 1)
 
     def reset_lstm(self, keep_states=False, model=None, use_cuda=False):
@@ -42,9 +43,14 @@ class MetaOptimizer(nn.Module):
         grads = []
         
         for module in model_with_grads.children():
-            grads.append(module._parameters['weight'].grad.data.view(-1).unsqueeze(-1))
-            grads.append(module._parameters['bias'].grad.data.view(-1).unsqueeze(-1))
-
+            if isinstance(module, nn.modules.linear.Linear):
+                grads.append(module._parameters['weight'].grad.data.view(-1).unsqueeze(-1))
+                grads.append(module._parameters['bias'].grad.data.view(-1).unsqueeze(-1))
+            else: # is instance of nn.modules.container.Sequential
+                for layer in module:
+                    grads.append(layer._parameters['weight'].grad.data.view(-1).unsqueeze(-1))
+                    grads.append(layer._parameters['bias'].grad.data.view(-1).unsqueeze(-1))
+                    
         flat_params = self.meta_model.get_flat_params().unsqueeze(-1)
         flat_grads = torch.cat(grads)
 
@@ -68,8 +74,86 @@ class MetaOptimizer(nn.Module):
         self.meta_model.copy_params_to(model_with_grads)
         return self.meta_model.model
         
+class MultiLayerMetaOptimizer(nn.Module):
+    def __init__(self, model, num_layers, hidden_size):
+        super(MultiLayerMetaOptimizer, self).__init__()
+        self.meta_model = model
+        self.hidden_size = hidden_size
         
+        self.linear1 = nn.Linear(3, hidden_size)
+        self.ln1 = LayerNorm1D(hidden_size)
 
+        self.lstms = []
+        for i in range(num_layers):
+            self.lstms.append(LayerNormLSTMCell(hidden_size,\
+                                                hidden_size))
+
+        self.linear2 = nn.Linear(hidden_size, 1)
+        self.linear2.weight.data.mul_(0.1)
+        self.linear2.bias.data.fill_(0.0)
+
+    def reset_lstm(self, keep_states=False,
+                   model=None, use_cuda=False):
+        self.meta_model.reset()
+        self.meta_model.copy_params_from(model)
+        if keep_states:
+            for i in range(len(self.lstms)):
+                self.hx[i] = Variable(self.hx[i].data)
+                self.cx[i] = Variable(self.cx[i].data)
+        else:
+            self.hx = []
+            self.cx = []
+            for i in range(len(self.lstms)):
+                self.hx.append(Variable(torch.zeros(1, self.hidden_size)))
+                self.cx.append(Variable(torch.zeros(1, self.hidden_size)))
+
+    def forward(self, x):
+        # Gradients preprocessing
+        x = torch.tanh(self.ln1(self.linear1(x)))
+
+        for i in range(len(self.lstms)):
+            if x.size(0) != self.hx[i].size(0):
+                self.hx[i] = self.hx[i].expand(x.size(0),
+                                               self.hx[i].size(1))
+                self.cx[i] = self.cx[i].expand(x.size(0),
+                                               self.cx[i].size(1))
+            self.hx[i], self.cx[i] = self.lstms[i](x, (self.hx[i], self.cx[i]))
+            x = self.hx[i]
+
+        x = self.linear2(x)
+        return x.squeeze()
+
+    def meta_update(self, model_with_grads, loss):
+        # Create a flat version of parameters and gradients
+        grads = []
+
+        for module in model_with_grads.children():
+            if isinstance(module, nn.modules.linear.Linear):
+                grads.append(module._parameters['weight'].grad.data.view(-1))
+                grads.append(module._parameters['bias'].grad.data.view(-1))
+
+                #             grads.append(module._parameters['weight'].grad.data.view(-1).unsqueeze(-1))
+                #            grads.append(module._parameters['bias'].grad.data.view(-1).unsqueeze(-1))
+            else:
+                for layer in module:
+                    grads.append(layer._parameters['weight'].grad.data.view(-1))
+                    grads.append(layer._parameters['bias'].grad.data.view(-1))
+        
+        flat_params = self.meta_model.get_flat_params()
+        flat_grads = preprocess_gradients(torch.cat(grads))
+
+        inputs = Variable(torch.cat((flat_grads, flat_params.data.unsqueeze(1)), 1))
+
+        # Meta update itself
+        flat_params = flat_params + self(inputs)
+        self.meta_model.set_flat_params(flat_params)
+
+        # Copy values from the meta model to the normal one.
+        self.meta_model.copy_params_to(model_with_grads)
+        return self.meta_model.model
+                          
+                         
+                    
 # A helper class that keeps track of meta updates
 # It's done by replacing parameters with variables and
 # applying updates to them.
@@ -148,16 +232,16 @@ def main():
     Create a meta optimizer that wraps a model into a meta model
     to keep track of the meta updates.
     '''
-#    model = FullyConnectedNN()
     model = MLP()
     meta_model = MetaModel(model)
     meta_model.reset()
     flat_params = meta_model.get_flat_params()
     meta_model.set_flat_params(flat_params)
 
-    x = torch.randn(1,1,28,28)
-    meta_optimizer = MetaOptimizer(meta_model, num_layers=2, hidden_size=10)
+    meta_optimizer = MultiLayerMetaOptimizer(meta_model, num_layers=2, hidden_size=10)
+    print(meta_optimizer)
     meta_optimizer.reset_lstm(model=model)
+
 
 if __name__ == '__main__':
     main()

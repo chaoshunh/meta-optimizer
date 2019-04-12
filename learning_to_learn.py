@@ -16,9 +16,11 @@ def detach_var(v):
     return var
 
 def training(optimizer, meta_optim, TargetLoss, Optimizee,
-             unroll=20, optim_it=100,
+             unroll=20, op_iters=100,
               out_mul=1.0, should_train=True):
-    '''Calcate the total sum loss of optimizer on training optimizee.'''
+    '''Training optimizer: 
+        - calcate the total sum loss of optimizer on training optimizee, 
+        - and update optimizer's parameters.'''
     if should_train:
         optimizer.train()
     else:
@@ -27,67 +29,73 @@ def training(optimizer, meta_optim, TargetLoss, Optimizee,
     
     target = TargetLoss(training=should_train)
     optimizee = Optimizee()
-    n_params = 0
+    num_params = 0 # total number of optimizee's parameters
     for param in optimizee.parameters():
-        n_params += int(np.prod(param.size()))
+        num_params += int(np.prod(param.size()))
         
-    hidden_states = [Variable(torch.zeros(n_params, optimizer.D_H)) for _ in range(2)]
-    cell_states = [Variable(torch.zeros(n_params, optimizer.D_H)) for _ in range(2)]
-    all_losses_ever = []
+    total_losses_ever = []
     
     if should_train:
         meta_optim.zero_grad()
-    all_losses = None
-    
-    for iteration in range(1, optim_it + 1):
-        loss = optimizee(target)
-        if all_losses is None:
-            all_losses = loss
-        else:
-            all_losses += loss
-        
-        all_losses_ever.append(loss.item())
-        loss.backward(retain_graph=should_train)
 
+    total_losses = None # optimizer's loss which is the sum of each iteration loss of optimizee
+    for iteration in range(1, op_iters+1):
+        optimizee_loss = optimizee(target)
+        if total_losses is None:
+            total_losses = optimizee_loss
+        else:
+            total_losses += optimizee_loss
+        
+        total_losses_ever.append(optimizee_loss.item())
+        optimizee_loss.backward(retain_graph=should_train)
+
+        # update optimizer
         offset = 0
         result_params = {}
-        hidden_states2 = [Variable(torch.zeros(n_params, optimizer.D_H)) for _ in range(2)]
-        cell_states2 = [Variable(torch.zeros(n_params, optimizer.D_H)) for _ in range(2)]
+
+        # initial hidden states parameters: weights and bias
+        h0 = [Variable(torch.zeros(num_params, optimizer.D_H)) for _ in range(2)]
+        c0 = [Variable(torch.zeros(num_params, optimizer.D_H)) for _ in range(2)]
+    
+        h1 = [Variable(torch.zeros(num_params, optimizer.D_H)) for _ in range(2)]
+        c1 = [Variable(torch.zeros(num_params, optimizer.D_H)) for _ in range(2)]
+        
         for name, param in optimizee.all_named_parameters():
             param_size = int(np.prod(param.size()))
             # We do this so the gradients are disconnected from the graph but we still get
             # gradients from the rest
             gradients = detach_var(param.grad.view(param_size, 1))
-            updates, new_hidden, new_cell = optimizer(
+            updates, hidden_states, cell_states = optimizer(
                 gradients,
-                [h[offset:offset+param_size] for h in hidden_states],
-                [c[offset:offset+param_size] for c in cell_states]
+                [state[offset:offset+param_size] for state in h0],
+                [state[offset:offset+param_size] for state in c0]
             )
-            for i in range(len(new_hidden)):
-                hidden_states2[i][offset:offset+param_size] = new_hidden[i]
-                cell_states2[i][offset:offset+param_size] = new_cell[i]
+            
+            for i in range(len(hidden_states)):
+                h1[i][offset:offset+param_size] = hidden_states[i]
+                c1[i][offset:offset+param_size] = cell_states[i]
+
             result_params[name] = param + updates.view(*param.size()) * out_mul
             result_params[name].retain_grad()
             
-        if iteration % unroll == 0:
+        if iteration % unroll == 0: # unroll all steps, and update optimizer
             if should_train:
                 meta_optim.zero_grad()
-                all_losses.backward()
+                total_losses.backward()
                 meta_optim.step()
-                
-            all_losses = None
-                        
-            optimizee = Optimizee(**{k: detach_var(v) for k, v in result_params.items()})
-            hidden_states = [detach_var(v) for v in hidden_states2]
-            cell_states = [detach_var(v) for v in cell_states2]
+            total_losses = None
             
+            # Reset optimizee with updated parameters and optimizer
+            optimizee = Optimizee(**{k: detach_var(v) for k, v in result_params.items()})
+            h0 = [detach_var(v) for v in h1]
+            c0 = [detach_var(v) for v in c1]
         else:
             optimizee = Optimizee(**result_params)
             assert len(list(optimizee.all_named_parameters()))
-            hidden_states = hidden_states2
-            cell_states = cell_states2
+            h0 = h1
+            c0 = c1
             
-    return all_losses_ever
+    return total_losses_ever
 
 
 def train_optimizer(TargetLoss, Optimizee, preproc=False, n_epochs=2, n_tests=10, lr=0.001):
@@ -109,7 +117,7 @@ def train_optimizer(TargetLoss, Optimizee, preproc=False, n_epochs=2, n_tests=10
             for _ in range(n_tests)
         ]))
 
-        print('\n==> epoch {}: sum_loss = {}'.format(epoch, loss))
+        print('\n==> epoch {}: total_loss = {}'.format(epoch, loss))
 
         if loss < best_loss:
               best_loss = loss
@@ -140,7 +148,6 @@ class QuadOptimizee(nn.Module):
     def all_named_parameters(self):
         return [('theta', self.theta)]
 
-
 class Optimizer(nn.Module):
     def __init__(self, preproc=False, D_H=20):
         super(Optimizer, self).__init__()
@@ -161,7 +168,7 @@ def main():
  #   print(quadratic.get_loss(theta))
 
     optimizee = QuadOptimizee()
-#    print(optimizee(quadratic))
+    print(optimizee(quadratic))
     loss, quad_optimizer = train_optimizer(QuadraticLoss, QuadOptimizee, lr=0.3)
     print('final loss:' , loss)
  
